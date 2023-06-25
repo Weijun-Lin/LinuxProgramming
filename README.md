@@ -1,0 +1,314 @@
+---
+description: Linux/Unix 上的通用 I/O 模型，并主要关注磁盘文件的 I/O 操作
+---
+
+# 1. 文件 I/O
+
+### 概述
+
+所有执行 IO 的系统调用均以文件描述符为目标，包括管道、FIFO、socket、终端设备和普通文件。每个进程中的文件描述符是互不相关的。 各个进程中默认会有三个标准文件描述符：
+
+<table><thead><tr><th>文件描述符</th><th>用途</th><th width="200">POSIX 名称</th><th>stdio 流</th></tr></thead><tbody><tr><td>0</td><td>标准输入</td><td>STDIN_FILENO</td><td>stdin</td></tr><tr><td>1</td><td>标准输出</td><td>STDOUT_FILENO</td><td>stdout</td></tr><tr><td>2</td><td>标准错误</td><td>STDERR_FILENO</td><td>stderr</td></tr></tbody></table>
+
+其中 POSIX 名称定义在头文件 `<unistd.h>` 中。
+
+### 通用 I/O
+
+UNIX I/O 模型的特点为 I/O 的通用性概念。针对系统所有的文件，包括设备、管道、socket 等可用文件描述符表示的资源，都可以通过同一套系统调用执行 I/O 操作。
+
+#### open 打开文件
+
+```c
+#include <sys/stat.h>		// 文件属性信息结构体的相关申明
+#include <fcntl.h>		// 文件操作的相关声明
+/*
+@brief	打开一个文件
+@param	pathname	要打开文件的路径，如果是符号链接会解引用
+@param	flags		位掩码，指定文件访问模式
+@param	mode		可忽略，标识文件的所有权限，一般在创建文件时使用
+@return	成功返回文件描述符，失败返回 -1
+*/
+int open(const char *pathname, int flags, ... /* mode_t mode*/);
+```
+
+flags 可取：
+
+```
+O_RDONLY	只读
+O_WRONLY	只写
+O_RDWR		读写
+```
+
+以上三个必须选择一个。此外还有一下标志：
+
+```
+O_CLOEXEC		设置 close-on-exec 标志，在执行 exec() 后关闭文件描述符
+O_CREAT			不存在则创建
+O_DIRECT		无缓冲 I/O
+O_DIRECTORY	        目标不是目录则失败
+O_EXCL			文件存在则返回错误，配合 O_CREAT 使用用于创建文件
+O_LARGEFILE	        32 位系统使用，用于打开大文件
+O_NOATIME		不修改文件最近访问时间
+O_NOFOLLOW	        符号链接不要解引用
+O_NOCTTY		目标不能成为控制终端
+O_TRUNC			截断文件，使其长度为 0，清空文件
+---------- 以下允许通过 fcntl 函数修改 ----------
+O_APPEND		尾部追加
+O_ASYNC			I/O 可操作时，使用信号通知进程
+O_DSYNC			提供同步 I/O 数据的完整性
+O_SYNC			文件同步方式写入
+O_NONBLOCK	        非阻塞打开文件
+```
+
+打开文件失败会返回 -1，并更新错误号 errno，可能的错误号如下所示：
+
+```
+EACCES	文件权限原因不能打开文件
+EISDIR	文件为目录
+EMFILE	打开的文件描述符已经达到进程资源限制的上限
+ENFILE	文件打开数量达到系统允许的上限
+ENOENT	文件不存在
+EROFS	目标文件只读，却以写方式打开
+ETXTBSY	目标文件为可执行文件且正在运行，不能修改
+```
+
+#### read 读取文件内容
+
+```c
+#include <unistd.h>
+/*
+@brief	从 fd 文件描述符指定的文件读取 count 字节数据到 buffer 中
+@return	失败返回 -1，读到文件结束返回 0，否则返回读取的字节数
+*/
+ssize_t read(int fd, void *buffer, size_t count)
+```
+
+#### write 写入文件
+
+```c
+#include <unistd.h>
+/*
+@brief	将 buffer 中 count 字节的数据写入 fd 文件
+@return	失败返回 -1，否则返回写入的字节
+*/
+ssize_t write(int fd, void *buffer, size_t count)
+```
+
+#### close 关闭文件
+
+```c
+#include <unistd.h>
+/*
+@brief	关闭指定的文件
+@return	失败返回 -1，成功返回 0
+*/
+int close(int fd)
+```
+
+#### lseek 改变文件偏移量
+
+```c
+#include <unistd.h>
+/*
+@brief	改变文件 fd 偏移量
+@param  offset 相对于 where 的偏移量
+@param	where 可取：
+    	- SEEK_SET: 文件开头
+        - SEEK_CUR: 当前文件位置
+        - SEEK_END: 文件尾部
+@return	失败返回 -1，读到文件结束返回 0，否则返回读取的字节数
+*/
+off_t read(int fd, off_t offset, int where)
+```
+
+可以在文件任意位置写入，但当偏移量跨度很大的时候，这部分数据并不会占用磁盘空间，称为文件空洞。
+
+### 深入探究文件 I/O
+
+所有的系统调用俊文原子操作，在编写 I/O 代码时要注意进程间可能的竞争关系。
+
+#### 文件控制 fcntl
+
+```c
+#include <fcntl.h>
+/*
+@brief	对打开的文件描述符 fd 执行一系列操作（cmd 表示）
+@return	失败返回 -1，成功返回值取决于 cmd
+*/
+int fcntl(int fd, int cmd, ...);
+// 一些常用的 cmd
+int old_flags = fcntl(fd, F_GETFL);		// 获取文件状态标志
+fcntl(fd, F_SETFL, new_flags);			// 设置文件状态标志
+```
+
+#### 文件描述符与文件的关系
+
+对于文件，内核维护以下三个数据结构：
+
+* 进程级的文件描述符表
+  * close-on-exec 标志
+  * 文件句柄的引用，指向系统的文件表
+* 系统级的打开文件表
+  * 每一条目是打开文件句柄，指向 i-node 表
+  * 文件偏移量
+  * 文件状态标志
+  * 文件访问模式
+  * 与信号驱动 I/O 相关的设置
+* 文件系统的 i-node 表
+  * 文件类型
+  * 指向文件持有锁的指针
+  * 文件各种属性
+
+上面的结构揭示了：
+
+* 不同的文件描述符，若指向同一个文件句柄，则共享同一文件偏移量
+* 文件标志位的修改也同上
+* close-on-exec 为进程私有
+
+#### 复制文件描述符
+
+```c
+#include <unistd.h>
+
+// 复制已打开的文件描述符 oldfd，成功则返回新的描述符，指向同一文件句柄，失败则返回 -1
+int dup(int oldfd);
+
+// 可指定复制后的描述符为 newfd，若存在则先关闭原来的 newfd
+int dup2(int oldfd, int newfd);
+
+// flags 只能为 O_CLOEXEC, Linux 特有函数
+#define _GNU_SOURCE
+int dup3(int oldfd, int newfd, int flags);
+```
+
+#### 特定偏移量处的 I/O
+
+```c
+#include <unistd.h>
+// 读写特定偏移量的数据，且不改变当前文件偏移量
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
+
+// 相当于将下面的代码封装为系统调用
+off_t orig = lseek(fd, 0, SEEK_CUR);
+lseek(fd, offset, SEEK_SET);
+s = read(fd, buf, count);
+lseek(fd, orig, SEEK_CUR);
+```
+
+可方便多线程应用，因为系统调用为原子操作。
+
+#### 分散输入和集中输出
+
+```c
+#include <sys/uio.h>
+
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+// 读写数据到 iovec 链表声明的所有数据块中
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt);
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
+```
+
+#### 截断文件
+
+```c
+#include <unistd.h>
+// 设置文件到指定大小，文件大小大于 length 则删除多余部分，若小于，则添加空字节或文件空洞
+int truncate(const char *pathname, off_t length);
+int ftruncate(int fd, off_t length);
+```
+
+#### 非阻塞 I/O
+
+一般情况下文件 I/O 默认为非阻塞的，除非使用强制文件锁。对于管道、FIFO、套接字、设备要启用非阻塞需要通过 fcntl 函数设置 O\_NONBLOCK 标志。
+
+#### /dev/fd 目录
+
+此目录为虚拟目录，其中 /dev/fd/n 对应进程打开的各个文件描述符。打开/dev/fd 目录中的一个文件等同于复制相应的文件描述符。
+
+#### 创建临时文件
+
+此功能为 GNU C 提供：
+
+```c
+#include <stdlib.h>
+// template 为临时文件路径，最后 6 个字符必须为 XXXXXX，这几个字符会被替换以保证唯一
+// 成功返回文件描述符，否则返回 -1
+int mkstemp(char *template);
+
+#include <stdio.h>
+// 返回的是 C 文件指针
+FILE *tmpfile(void);
+```
+
+### 文件 I/O 缓冲
+
+#### 文件 I/O 内核缓冲
+
+read 和 write 系统调用在操作磁盘文件时不会直接发起磁盘访问，而是仅仅在用户空间缓冲区与内核缓冲区高速缓存之间复制数据。可大大减少与磁盘交互的时间。内核缓冲区由内核设置，不能修改。
+
+#### stdio 库的缓冲
+
+```c
+#include <stdio.h>
+
+/*
+@brief 	修改文件流 stream 的缓冲为 buf 指向的 size 大小区域
+@param 	mode 指定缓冲类型
+       	- _IONBF: 不进行缓冲
+       	- _IOLBF: 行缓冲，标准输入输出一般使用这个
+       	- _IOFBF: 全缓冲，磁盘 IO 用的较多
+@return 成功返回 0， 失败返回 -1
+*/
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
+// 相当于 setvbuf(stream, buf, (buf != NULL) ? _IOFBF : _IONBF, BUFSIZ);
+void setbuf(FILe *stream, char *buf);
+
+#define _BSD_SOURCE
+void setbuffer(FILE *stream, char *buf, size_t size);
+
+// 刷新 stream 的缓冲区到内核缓冲区中，stream 为 NULL，则刷新所有缓冲区
+int fflush(FILE *stream);
+```
+
+#### 控制文件 I/O 的内核缓冲
+
+有以下两种同步 I/O 类型：
+
+* 同步 I/O 数据完整性：数据已成功全部写到磁盘，或全部从磁盘读入
+* 同步 I/O 文件完整性：是数据完整性的超级，还将同步文件元数据
+
+```c
+#include <unistd.h>
+
+// 使得文件处于 同步 I/O 文件完整性 状态
+int fsync(int fd);
+
+// 使得文件处于 同步 I/O 数据完整性 状态
+int fdatasync(int fd);
+
+// 刷新所有内核缓冲区
+void sync(void)
+```
+
+#### 直接 I/O
+
+通过 O\_DIRECT 绕过内核缓冲区直接与磁盘 I/O 需要注意：
+
+* 用于传递数据的缓冲区，其内存边界必须对齐为块大小的整数倍
+* 数据传输的开始点，亦即文件和设备的偏移量，必须是块大小的整数倍
+* 待传递数据的长度必须是块大小的整数倍
+
+#### 混合系统调用与库文件 I/O
+
+```c
+#include <stdio.h>
+// 获取 stream 的为文件描述符
+int fileno(FILE *stream);
+
+// 转换为文件流，mode 同 fopen 函数
+FILE *fdopen(int fd, const char* mode);
+```
