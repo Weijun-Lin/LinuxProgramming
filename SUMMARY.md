@@ -20,3 +20,4 @@
 * [7.1 POSIX IPC 介绍](7.-posix-ipc/7.1-posix-ipc-jie-shao.md)
 * [7.2 POSIX 消息队列](7.-posix-ipc/7.2-posix-xiao-xi-dui-lie.md)
 * [7.3 POSIX 信号量](7.-posix-ipc/7.3-posix-xin-hao-liang.md)
+* [7.4 POSIX 共享内存](7.-posix-ipc/7.4-posix-gong-xiang-nei-cun.md)
